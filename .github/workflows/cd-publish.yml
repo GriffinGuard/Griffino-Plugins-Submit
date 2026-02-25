@@ -270,6 +270,13 @@ jobs:
         if: steps.find.outputs.plugin_dir != ''
         run: |
           echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+          # 设置为完全信任
+          KEY_ID="${{ secrets.GPG_KEY_ID }}"
+          echo "${KEY_ID}:6:" | gpg --import-ownertrust
+          # 验证导入成功
+          gpg --list-secret-keys --keyid-format=long
+          # 验证签名功能正常
+          echo "test" | gpg --clearsign --default-key "${KEY_ID}" > /dev/null && echo "GPG signing works" || echo "GPG signing failed"
 
       - name: Publish to griffino-plugins
         if: steps.find.outputs.plugin_dir != ''
