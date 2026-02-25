@@ -1,23 +1,42 @@
 name: Plugin Submission CI
 
 on:
-  pull_request:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
     paths:
       - 'submissions/**'
 
 jobs:
+  # ── Job 1: Format & whitelist validation ─────────────────────────────────
   validate:
     name: Validate Submission
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      plugin_dir: ${{ steps.find.outputs.plugin_dir }}
+      plugin_id:  ${{ steps.find.outputs.plugin_id }}
+      is_new:     ${{ steps.find.outputs.is_new }}
+      version:    ${{ steps.meta.outputs.version }}
+      short_commit: ${{ steps.meta.outputs.short_commit }}
+      commit_url:   ${{ steps.meta.outputs.commit_url }}
+      source_repo:  ${{ steps.meta.outputs.source_repo }}
+      changelog:    ${{ steps.meta.outputs.changelog }}
+      plugin_name:  ${{ steps.meta.outputs.plugin_name }}
+      has_unapproved: ${{ steps.image_check.outputs.has_unapproved }}
+      unapproved_images: ${{ steps.image_check.outputs.unapproved_images }}
+
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Find changed submission directory
         id: find
         run: |
-          CHANGED=$(git diff --name-only origin/main...HEAD | grep '^submissions/' | grep -v '^submissions/\.example' | head -1)
+          CHANGED=$(git diff --name-only origin/main...${{ github.event.pull_request.head.sha }} \
+            | grep '^submissions/' | grep -v '^submissions/\.example' | head -1)
           if [ -z "$CHANGED" ]; then
             echo "No submission changes detected."
             exit 0
@@ -26,7 +45,11 @@ jobs:
           PLUGIN_ID=$(echo "$PLUGIN_DIR" | cut -d'/' -f2)
           echo "plugin_dir=$PLUGIN_DIR" >> $GITHUB_OUTPUT
           echo "plugin_id=$PLUGIN_ID" >> $GITHUB_OUTPUT
-          echo "Detected plugin: $PLUGIN_ID"
+          if git show origin/main:"$PLUGIN_DIR/submission.json" > /dev/null 2>&1; then
+            echo "is_new=false" >> $GITHUB_OUTPUT
+          else
+            echo "is_new=true" >> $GITHUB_OUTPUT
+          fi
 
       - name: Check required files
         if: steps.find.outputs.plugin_dir != ''
@@ -34,37 +57,29 @@ jobs:
           PLUGIN_DIR="${{ steps.find.outputs.plugin_dir }}"
           MISSING=()
           for f in submission.json plugin.manifest.json plugin.boot.yml config.boot.json; do
-            if [ ! -f "$PLUGIN_DIR/$f" ]; then
-              MISSING+=("$f")
-            fi
+            [ ! -f "$PLUGIN_DIR/$f" ] && MISSING+=("$f")
           done
           if [ ${#MISSING[@]} -ne 0 ]; then
             echo "::error::Missing required files: ${MISSING[*]}"
             exit 1
           fi
-          echo "All required files present."
 
       - name: Validate submission.json
         if: steps.find.outputs.plugin_dir != ''
         run: |
-          pip install jsonschema --quiet
           python3 - <<EOF
           import json, sys
-
           with open("${{ steps.find.outputs.plugin_dir }}/submission.json") as f:
               data = json.load(f)
-
-          required = ["pluginId", "version", "developerGitHub", "sourceRepo", "sourceCommit", "mainServiceDockerfile", "submittedAt", "changelog"]
+          required = ["pluginId","version","developerGitHub","sourceRepo",
+                      "sourceCommit","mainServiceDockerfile","submittedAt","changelog"]
           missing = [k for k in required if not data.get(k)]
           if missing:
               print(f"::error::submission.json missing required fields: {missing}")
               sys.exit(1)
-
           if len(data["sourceCommit"]) != 40:
               print("::error::sourceCommit must be a full 40-character commit hash.")
               sys.exit(1)
-
-          print("submission.json validation passed.")
           EOF
 
       - name: Validate plugin.manifest.json
@@ -72,33 +87,25 @@ jobs:
         run: |
           python3 - <<EOF
           import json, sys
-
           with open("${{ steps.find.outputs.plugin_dir }}/plugin.manifest.json") as f:
               manifest = json.load(f)
-
           with open("${{ steps.find.outputs.plugin_dir }}/submission.json") as f:
               submission = json.load(f)
-
-          required = ["griffinoPluginManifestVersion", "id", "version", "name", "description",
-                      "author", "license", "configurationFiles", "capabilities"]
+          required = ["griffinoPluginManifestVersion","id","version","name","description",
+                      "author","license","configurationFiles","capabilities"]
           missing = [k for k in required if k not in manifest]
           if missing:
               print(f"::error::plugin.manifest.json missing required fields: {missing}")
               sys.exit(1)
-
           if manifest["id"] != submission["pluginId"]:
-              print(f"::error::manifest.id ({manifest['id']}) does not match submission.pluginId ({submission['pluginId']})")
+              print("::error::manifest.id does not match submission.pluginId")
               sys.exit(1)
-
           if manifest["version"] != submission["version"]:
-              print(f"::error::manifest.version ({manifest['version']}) does not match submission.version ({submission['version']})")
+              print("::error::manifest.version does not match submission.version")
               sys.exit(1)
-
           if not manifest.get("capabilities"):
               print("::error::plugin.manifest.json must declare at least one capability.")
               sys.exit(1)
-
-          print("plugin.manifest.json validation passed.")
           EOF
 
       - name: Fetch approved image whitelist
@@ -106,7 +113,6 @@ jobs:
         run: |
           curl -sf https://raw.githubusercontent.com/GriffinGuard/griffino-plugins/main/approved-images.json \
             -o approved-images.json
-          echo "Fetched approved-images.json from griffino-plugins."
 
       - name: Check image whitelist
         id: image_check
@@ -114,57 +120,352 @@ jobs:
         run: |
           pip install pyyaml --quiet
           python3 - <<EOF
-          import json, yaml, sys, os
-
+          import json, yaml, os
           with open("approved-images.json") as f:
               approved = {img["image"] for img in json.load(f)["approvedImages"]}
-
           with open("${{ steps.find.outputs.plugin_dir }}/plugin.boot.yml") as f:
               boot = yaml.safe_load(f)
-
+          main_svc = boot.get("mainServiceId", "")
           unapproved = []
           for svc_id, svc in boot.get("services", {}).items():
+              if svc_id == main_svc:
+                  continue
               image = svc.get("image", "")
               if image.startswith("ghcr.io/griffinguard/"):
                   continue
               if image and image not in approved:
                   unapproved.append(image)
-
-          if unapproved:
-              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              if unapproved:
                   f.write(f"unapproved_images={','.join(unapproved)}\n")
                   f.write("has_unapproved=true\n")
-              print(f"Unapproved images detected: {unapproved}")
-          else:
-              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              else:
                   f.write("has_unapproved=false\n")
-              print("All auxiliary images are on the approved whitelist.")
           EOF
 
-      - name: Comment unapproved images warning
-        if: steps.image_check.outputs.has_unapproved == 'true'
+      - name: Collect submission metadata
+        id: meta
+        if: steps.find.outputs.plugin_dir != ''
+        run: |
+          python3 - <<EOF
+          import json, os, subprocess, yaml
+          plugin_dir = "${{ steps.find.outputs.plugin_dir }}"
+          is_new = "${{ steps.find.outputs.is_new }}" == "true"
+          with open(f"{plugin_dir}/submission.json") as f:
+              submission = json.load(f)
+          with open(f"{plugin_dir}/plugin.manifest.json") as f:
+              manifest = json.load(f)
+          source_repo   = submission["sourceRepo"]
+          source_commit = submission["sourceCommit"]
+          version       = submission["version"]
+          changelog     = submission["changelog"]
+          short_commit  = source_commit[:7]
+          commit_url    = f"{source_repo}/commit/{source_commit}"
+          name = manifest["name"]
+          if isinstance(name, dict):
+              name = name.get("default", "")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"plugin_name={name}\n")
+              f.write(f"version={version}\n")
+              f.write(f"source_repo={source_repo}\n")
+              f.write(f"source_commit={source_commit}\n")
+              f.write(f"short_commit={short_commit}\n")
+              f.write(f"commit_url={commit_url}\n")
+              f.write(f"changelog={changelog}\n")
+          # Diff for updates
+          diff_lines = []
+          if not is_new:
+              result = subprocess.run(
+                  ["git", "show", f"origin/main:{plugin_dir}/plugin.manifest.json"],
+                  capture_output=True, text=True)
+              if result.returncode == 0:
+                  old = json.loads(result.stdout)
+                  old_ver = old.get("version", "")
+                  new_ver = manifest.get("version", "")
+                  if old_ver != new_ver:
+                      diff_lines.append(f"| Version | \`{old_ver}\` → \`{new_ver}\` |")
+                  old_caps = {c["id"]: c["type"] for c in old.get("capabilities", [])}
+                  new_caps = {c["id"]: c["type"] for c in manifest.get("capabilities", [])}
+                  for cap in set(new_caps) - set(old_caps):
+                      diff_lines.append(f"| Capability | ➕ \`{new_caps[cap]}\` added |")
+                  for cap in set(old_caps) - set(new_caps):
+                      diff_lines.append(f"| Capability | ➖ \`{old_caps[cap]}\` removed |")
+                  old_perms = {p["name"] for p in old.get("permissionsRequested", [])}
+                  new_perms = {p["name"] for p in manifest.get("permissionsRequested", [])}
+                  for p in new_perms - old_perms:
+                      diff_lines.append(f"| Permission | ➕ \`{p}\` added |")
+                  for p in old_perms - new_perms:
+                      diff_lines.append(f"| Permission | ➖ \`{p}\` removed |")
+                  result2 = subprocess.run(
+                      ["git", "show", f"origin/main:{plugin_dir}/submission.json"],
+                      capture_output=True, text=True)
+                  if result2.returncode == 0:
+                      old_sub = json.loads(result2.stdout)
+                      old_c = old_sub.get("sourceCommit", "")[:7]
+                      old_r = old_sub.get("sourceRepo", "")
+                      diff_lines.append(
+                          f"| Source | [\`{old_c}\`]({old_r}/commit/{old_sub.get('sourceCommit','')}) → [\`{short_commit}\`]({commit_url}) |")
+          with open("/tmp/diff_lines.txt", "w") as f:
+              f.write("\n".join(diff_lines))
+          EOF
+
+  # ── Job 2: Build amd64 ────────────────────────────────────────────────────
+  build-amd64:
+    name: Build (linux/amd64)
+    runs-on: ubuntu-latest
+    needs: validate
+    if: needs.validate.outputs.plugin_dir != ''
+    permissions:
+      contents: read
+    outputs:
+      build_success: ${{ steps.build.outputs.success }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Read submission metadata
+        id: meta
+        run: |
+          python3 - <<EOF
+          import json, os
+          with open("${{ needs.validate.outputs.plugin_dir }}/submission.json") as f:
+              s = json.load(f)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"source_repo={s['sourceRepo']}\n")
+              f.write(f"source_commit={s['sourceCommit']}\n")
+              f.write(f"dockerfile={s['mainServiceDockerfile']}\n")
+          EOF
+
+      - name: Checkout plugin source
+        run: |
+          git clone ${{ steps.meta.outputs.source_repo }} plugin-source
+          cd plugin-source && git checkout ${{ steps.meta.outputs.source_commit }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (amd64)
+        id: build
+        run: |
+          PLUGIN_ID="${{ needs.validate.outputs.plugin_id }}"
+          VERSION="${{ needs.validate.outputs.version }}"
+          docker buildx build \
+            --platform linux/amd64 \
+            --file ./plugin-source/${{ steps.meta.outputs.dockerfile }} \
+            --tag griffino-ci/${PLUGIN_ID}:${VERSION}-amd64 \
+            --output type=docker \
+            ./plugin-source
+          echo "success=true" >> $GITHUB_OUTPUT
+
+      - name: Save image as artifact
+        run: |
+          PLUGIN_ID="${{ needs.validate.outputs.plugin_id }}"
+          VERSION="${{ needs.validate.outputs.version }}"
+          docker save griffino-ci/${PLUGIN_ID}:${VERSION}-amd64 \
+            | gzip > image-amd64.tar.gz
+
+      - name: Upload amd64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-amd64-pr${{ github.event.pull_request.number }}
+          path: image-amd64.tar.gz
+          retention-days: 90
+
+  # ── Job 3: Build arm64 ────────────────────────────────────────────────────
+  build-arm64:
+    name: Build (linux/arm64)
+    runs-on: ubuntu-24.04-arm
+    needs: validate
+    if: needs.validate.outputs.plugin_dir != ''
+    permissions:
+      contents: read
+    outputs:
+      build_success: ${{ steps.build.outputs.success }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Read submission metadata
+        id: meta
+        run: |
+          python3 - <<EOF
+          import json, os
+          with open("${{ needs.validate.outputs.plugin_dir }}/submission.json") as f:
+              s = json.load(f)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"source_repo={s['sourceRepo']}\n")
+              f.write(f"source_commit={s['sourceCommit']}\n")
+              f.write(f"dockerfile={s['mainServiceDockerfile']}\n")
+          EOF
+
+      - name: Checkout plugin source
+        run: |
+          git clone ${{ steps.meta.outputs.source_repo }} plugin-source
+          cd plugin-source && git checkout ${{ steps.meta.outputs.source_commit }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (arm64)
+        id: build
+        run: |
+          PLUGIN_ID="${{ needs.validate.outputs.plugin_id }}"
+          VERSION="${{ needs.validate.outputs.version }}"
+          docker buildx build \
+            --platform linux/arm64 \
+            --file ./plugin-source/${{ steps.meta.outputs.dockerfile }} \
+            --tag griffino-ci/${PLUGIN_ID}:${VERSION}-arm64 \
+            --output type=docker \
+            ./plugin-source
+          echo "success=true" >> $GITHUB_OUTPUT
+
+      - name: Save image as artifact
+        run: |
+          PLUGIN_ID="${{ needs.validate.outputs.plugin_id }}"
+          VERSION="${{ needs.validate.outputs.version }}"
+          docker save griffino-ci/${PLUGIN_ID}:${VERSION}-arm64 \
+            | gzip > image-arm64.tar.gz
+
+      - name: Upload arm64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-arm64-pr${{ github.event.pull_request.number }}
+          path: image-arm64.tar.gz
+          retention-days: 90
+
+  # ── Job 4: Post comment ───────────────────────────────────────────────────
+  comment:
+    name: Post Review Comment
+    runs-on: ubuntu-latest
+    needs: [validate, build-amd64, build-arm64]
+    if: always() && needs.validate.outputs.plugin_dir != ''
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download diff lines
+        uses: actions/download-artifact@v4
+        with:
+          name: image-amd64-pr${{ github.event.pull_request.number }}
+          path: /tmp/artifacts
+        continue-on-error: true
+
+      - name: Mark previous comments as outdated
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.GRIFFINO_BOT_TOKEN }}
           script: |
-            const images = '${{ steps.image_check.outputs.unapproved_images }}'.split(',');
-            const list = images.map(img => `- \`${img}\``).join('\n');
+            const comments = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const botComments = comments.data.filter(c =>
+              c.user.login === 'GriffinoBot' &&
+              (c.body.includes('All checks passed') ||
+               c.body.includes('Build failed') ||
+               c.body.includes('Review required'))
+            );
+            for (const comment of botComments) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: comment.id,
+                body: comment.body.replace(
+                  /^(###.+)/m,
+                  '~~$1~~ *(Outdated attempt)*'
+                )
+              });
+            }
+
+      - name: Post review comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GRIFFINO_BOT_TOKEN }}
+          script: |
+            const amd64ok  = '${{ needs.build-amd64.result }}' === 'success';
+            const arm64ok  = '${{ needs.build-arm64.result }}' === 'success';
+            const buildOk  = amd64ok && arm64ok;
+            const validateOk = '${{ needs.validate.result }}' === 'success';
+            const allOk    = validateOk && buildOk;
+
+            const isNew        = '${{ needs.validate.outputs.is_new }}' === 'true';
+            const pluginId     = '${{ needs.validate.outputs.plugin_id }}';
+            const pluginName   = '${{ needs.validate.outputs.plugin_name }}';
+            const version      = '${{ needs.validate.outputs.version }}';
+            const sourceRepo   = '${{ needs.validate.outputs.source_repo }}';
+            const shortCommit  = '${{ needs.validate.outputs.short_commit }}';
+            const commitUrl    = '${{ needs.validate.outputs.commit_url }}';
+            const changelog    = '${{ needs.validate.outputs.changelog }}';
+            const hasUnapproved = '${{ needs.validate.outputs.has_unapproved }}' === 'true';
+            const unapprovedRaw = '${{ needs.validate.outputs.unapproved_images }}';
+            const unapprovedImages = hasUnapproved ? unapprovedRaw.split(',') : [];
+
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${{ github.run_id }}`;
+
+            let body = '';
+
+            if (allOk && !hasUnapproved) {
+              body += `### ✅ All checks passed!\n\n`;
+            } else if (!buildOk) {
+              body += `### ❌ Build failed\n\n`;
+            } else {
+              body += `### ⚠️ Review required\n\n`;
+            }
+
+            body += `> Please review this submission carefully before approving. `;
+            body += `Ensure the source commit matches the declared functionality.\n\n`;
+
+            // Main table
+            const typeLabel = isNew ? '🆕 New Plugin' : '🔄 Update';
+            const amd64Status = amd64ok ? '✅' : '❌';
+            const arm64Status = arm64ok ? '✅' : '❌';
+
+            body += `| Name | Commit | Version | amd64 | arm64 |\n`;
+            body += `|---|---|---|---|---|\n`;
+            body += `| ${typeLabel} **${pluginName}** | `;
+            body += `[\`${shortCommit}\`](${commitUrl}) | `;
+            body += `\`${version}\` | `;
+            body += `${amd64Status} | ${arm64Status} |\n\n`;
+
+            body += `**Changelog:** ${changelog}\n\n`;
+
+            if (!buildOk) {
+              body += `#### Build Failure\n`;
+              if (!amd64ok) body += `- ❌ linux/amd64 build failed\n`;
+              if (!arm64ok) body += `- ❌ linux/arm64 build failed\n`;
+              body += `\n[Show build log](${runUrl})\n\n`;
+            }
+
+            if (hasUnapproved) {
+              const list = unapprovedImages.map(img => `- \`${img}\``).join('\n');
+              body += `#### ⚠️ Unapproved Auxiliary Images\n\n`;
+              body += `The following images are not on the approved whitelist and require Maintainer review:\n\n`;
+              body += list + '\n\n';
+              body += `Please verify the source, Dockerfile, and publisher reputation before approving.\n\n`;
+            }
+
+            // Diff for updates
+            if (!isNew) {
+              body += `#### Changes\n\n`;
+              body += `| Field | Change |\n|---|---|\n`;
+              // diff lines are passed via validate job outputs if we had file access
+              // For now link to the diff view
+              body += `| — | [View full diff](${sourceRepo}/compare) |\n\n`;
+            }
+
+            body += `---\n`;
+            body += `<sub>Griffino CI · [\`${shortCommit}\`](${commitUrl}) · `;
+            body += `[Source Repository](${sourceRepo}) · `;
+            body += `[Action log](${runUrl})</sub>`;
+
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `## ⚠️ Unapproved Auxiliary Images\n\nThe following images are not on the approved whitelist and require Maintainer review before this PR can be approved:\n\n${list}\n\nPlease verify the source, Dockerfile, and publisher reputation of these images before approving.`
+              body
             });
-
-      - name: Summary
-        if: steps.find.outputs.plugin_dir != ''
-        run: |
-          echo "## CI Check Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Plugin ID:** ${{ steps.find.outputs.plugin_id }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.image_check.outputs.has_unapproved }}" == "true" ]; then
-            echo "⚠️ Unapproved auxiliary images detected — Maintainer image review required." >> $GITHUB_STEP_SUMMARY
-          else
-            echo "✅ All auxiliary images are approved." >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "✅ All format checks passed." >> $GITHUB_STEP_SUMMARY
