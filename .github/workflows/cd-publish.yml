@@ -222,7 +222,7 @@ jobs:
       - name: Publish to griffino-plugins
         if: steps.find.outputs.plugin_dir != ''
         env:
-          CD_BOT_TOKEN: ${{ secrets.GRIFFINO_BOT_CD_TOKEN }}
+          CD_BOT_TOKEN: ${{ secrets.CD_BOT_TOKEN }}
         run: |
           PLUGIN_ID="${{ steps.find.outputs.plugin_id }}"
           VERSION="${{ steps.meta.outputs.version }}"
