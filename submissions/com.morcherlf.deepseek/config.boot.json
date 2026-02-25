@@ -1,0 +1,63 @@
+{
+  "GriffinoPluginConfigVersion": "1.0",
+  "pluginId": "com.morcherlf.deepseek",
+  "name": "DeepSeek AI",
+  "tutorial": "https://platform.deepseek.com/api-docs",
+  "site": "https://github.com/MorCherlf/Griffino-DeepSeek-Plugin",
+  "services": [
+    {
+      "id": "deepseek-service",
+      "configs": [
+        {
+          "key": "DEEPSEEK_API_KEY",
+          "name": "DeepSeek API Key",
+          "description": "Your DeepSeek API key. Get it at https://platform.deepseek.com.",
+          "type": "password",
+          "optional": false,
+          "group": "API Configuration"
+        },
+        {
+          "key": "DEEPSEEK_MODEL",
+          "name": "Model",
+          "description": "The DeepSeek model to use.",
+          "type": "options",
+          "optional": false,
+          "default": "deepseek-chat",
+          "values": [
+            { "value": "deepseek-chat",     "display": "DeepSeek-V3 (Recommended)" },
+            { "value": "deepseek-reasoner", "display": "DeepSeek-R1 (Reasoning)" }
+          ],
+          "group": "API Configuration"
+        },
+        {
+          "key": "DEEPSEEK_BASE_URL",
+          "name": "API Base URL",
+          "description": "DeepSeek API base URL. Change this if using a proxy or compatible service.",
+          "type": "string",
+          "optional": true,
+          "default": "https://api.deepseek.com",
+          "group": "API Configuration"
+        },
+        {
+          "key": "MAX_TOKENS",
+          "name": "Max Output Tokens",
+          "description": "Maximum number of tokens in a single response. Cannot exceed 8192.",
+          "type": "int",
+          "optional": true,
+          "default": 4096,
+          "validation": { "minimum": 256, "maximum": 8192 },
+          "group": "Model Parameters"
+        },
+        {
+          "key": "SYSTEM_PROMPT",
+          "name": "Global System Prompt",
+          "description": "System prompt applied to all users. Each user's personal prompt is appended after this.",
+          "type": "string",
+          "optional": true,
+          "default": "You are a helpful assistant.",
+          "group": "Model Parameters"
+        }
+      ]
+    }
+  ]
+}

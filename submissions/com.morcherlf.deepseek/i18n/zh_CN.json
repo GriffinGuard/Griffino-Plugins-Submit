@@ -1,0 +1,7 @@
+{
+  "plugin.name": "DeepSeek AI",
+  "plugin.description": "通过 DeepSeek 官方 API 提供 AI 对话能力。",
+  "capability.ai_chat_model.name": "AI 对话模型",
+  "capability.ai_chat_model.description": "接收对话历史，调用 DeepSeek API 返回 AI 回复。",
+  "permission.desc.network_outbound": "需要访问互联网以调用 DeepSeek API。"
+}
