@@ -1,0 +1,19 @@
+# MAINTAINERS
+
+This file lists the maintainers responsible for reviewing plugin submissions.
+
+## Active Maintainers
+
+| GitHub Username | Role          |
+|-----------------|---------------|
+| MorCherlf       | Lead Maintainer |
+
+## Review Policy
+
+- All plugin submissions require at least **1 Maintainer approval** before merging.
+- PRs that introduce unapproved auxiliary images require **extra scrutiny** of the image source, Dockerfile, and publisher reputation.
+- Even GriffinGuard team members must submit plugins through this repository. There are no exceptions.
+
+## Becoming a Maintainer
+
+Maintainers are appointed by the Lead Maintainer based on sustained contributions and demonstrated understanding of the plugin security model.

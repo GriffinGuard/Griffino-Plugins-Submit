@@ -1,0 +1,225 @@
+name: Plugin Publish CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'submissions/**'
+
+jobs:
+  publish:
+    name: Build and Publish Plugin
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Find merged submission
+        id: find
+        run: |
+          CHANGED=$(git diff --name-only HEAD~1 HEAD | grep '^submissions/' | grep -v '^submissions/\.example' | head -1)
+          if [ -z "$CHANGED" ]; then
+            echo "No submission changes detected. Skipping."
+            exit 0
+          fi
+          PLUGIN_DIR=$(echo "$CHANGED" | cut -d'/' -f1-2)
+          PLUGIN_ID=$(echo "$PLUGIN_DIR" | cut -d'/' -f2)
+          echo "plugin_dir=$PLUGIN_DIR" >> $GITHUB_OUTPUT
+          echo "plugin_id=$PLUGIN_ID" >> $GITHUB_OUTPUT
+          echo "Publishing plugin: $PLUGIN_ID"
+
+      - name: Read submission metadata
+        if: steps.find.outputs.plugin_dir != ''
+        id: meta
+        run: |
+          DATA=$(cat "${{ steps.find.outputs.plugin_dir }}/submission.json")
+          echo "version=$(echo $DATA | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])')" >> $GITHUB_OUTPUT
+          echo "source_repo=$(echo $DATA | python3 -c 'import sys,json;print(json.load(sys.stdin)["sourceRepo"])')" >> $GITHUB_OUTPUT
+          echo "source_commit=$(echo $DATA | python3 -c 'import sys,json;print(json.load(sys.stdin)["sourceCommit"])')" >> $GITHUB_OUTPUT
+          echo "dockerfile=$(echo $DATA | python3 -c 'import sys,json;print(json.load(sys.stdin)["mainServiceDockerfile"])')" >> $GITHUB_OUTPUT
+          echo "changelog=$(echo $DATA | python3 -c 'import sys,json;print(json.load(sys.stdin)["changelog"])')" >> $GITHUB_OUTPUT
+
+      - name: Checkout plugin source at specified commit
+        if: steps.find.outputs.plugin_dir != ''
+        run: |
+          git clone ${{ steps.meta.outputs.source_repo }} plugin-source
+          cd plugin-source
+          git checkout ${{ steps.meta.outputs.source_commit }}
+
+      - name: Set up Docker Buildx
+        if: steps.find.outputs.plugin_dir != ''
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        if: steps.find.outputs.plugin_dir != ''
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: GriffinoBot
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
+        if: steps.find.outputs.plugin_dir != ''
+        id: docker_build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./plugin-source
+          file: ./plugin-source/${{ steps.meta.outputs.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/griffinguard/${{ steps.find.outputs.plugin_id }}:${{ steps.meta.outputs.version }}
+            ghcr.io/griffinguard/${{ steps.find.outputs.plugin_id }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ steps.meta.outputs.source_repo }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
+            griffino.plugin.id=${{ steps.find.outputs.plugin_id }}
+            griffino.plugin.version=${{ steps.meta.outputs.version }}
+
+      - name: Rewrite main service image in plugin.boot.yml
+        if: steps.find.outputs.plugin_dir != ''
+        run: |
+          pip install pyyaml --quiet
+          IMAGE="ghcr.io/griffinguard/${{ steps.find.outputs.plugin_id }}:${{ steps.meta.outputs.version }}"
+          python3 - <<EOF
+          import yaml
+
+          with open("${{ steps.find.outputs.plugin_dir }}/plugin.boot.yml") as f:
+              boot = yaml.safe_load(f)
+
+          main_svc = boot.get("mainServiceId")
+          if main_svc and main_svc in boot.get("services", {}):
+              boot["services"][main_svc]["image"] = "$IMAGE"
+
+          with open("${{ steps.find.outputs.plugin_dir }}/plugin.boot.yml", "w") as f:
+              yaml.dump(boot, f, allow_unicode=True, sort_keys=False)
+
+          print(f"Rewrote main service image to: $IMAGE")
+          EOF
+
+      - name: Update approved-images.json if new images were introduced
+        if: steps.find.outputs.plugin_dir != ''
+        run: |
+          pip install pyyaml --quiet
+          curl -sf https://raw.githubusercontent.com/GriffinGuard/griffino-plugins/main/approved-images.json \
+            -o approved-images.json
+          python3 - <<EOF
+          import json, yaml, os
+          from datetime import datetime, timezone
+
+          with open("approved-images.json") as f:
+              approved_data = json.load(f)
+          approved_set = {img["image"] for img in approved_data["approvedImages"]}
+
+          with open("${{ steps.find.outputs.plugin_dir }}/plugin.boot.yml") as f:
+              boot = yaml.safe_load(f)
+
+          new_images = []
+          for svc_id, svc in boot.get("services", {}).items():
+              image = svc.get("image", "")
+              if image.startswith("ghcr.io/griffinguard/"):
+                  continue
+              if image and image not in approved_set:
+                  new_images.append({
+                      "image": image,
+                      "approvedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                      "approvedBy": "GriffinoBot",
+                      "notes": f"Approved via plugin submission: ${{ steps.find.outputs.plugin_id }}"
+                  })
+
+          if new_images:
+              approved_data["approvedImages"].extend(new_images)
+              approved_data["updatedAt"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+              with open("approved-images.json", "w") as f:
+                  json.dump(approved_data, f, indent=2, ensure_ascii=False)
+              print(f"Added {len(new_images)} new image(s) to whitelist.")
+          else:
+              print("No new images to add to whitelist.")
+          EOF
+
+      - name: Import GPG key
+        if: steps.find.outputs.plugin_dir != ''
+        run: |
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+          gpg --list-secret-keys
+
+      - name: Publish to griffino-plugins
+        if: steps.find.outputs.plugin_dir != ''
+        env:
+          CD_BOT_TOKEN: ${{ secrets.GRIFFINO_BOT_CD_TOKEN }}
+        run: |
+          PLUGIN_ID="${{ steps.find.outputs.plugin_id }}"
+          VERSION="${{ steps.meta.outputs.version }}"
+
+          git clone https://x-access-token:${CD_BOT_TOKEN}@github.com/GriffinGuard/griffino-plugins.git publish-target
+          cd publish-target
+
+          git config user.name "GriffinoBot"
+          git config user.email "cd-bot@griffino.cc"
+          git config user.signingkey ${{ secrets.GPG_KEY_ID }}
+          git config commit.gpgsign true
+
+          mkdir -p plugins/${PLUGIN_ID}/${VERSION}
+          cp -r ../${{ steps.find.outputs.plugin_dir }}/. plugins/${PLUGIN_ID}/${VERSION}/
+
+          rm -f plugins/${PLUGIN_ID}/latest
+          ln -sf ${VERSION} plugins/${PLUGIN_ID}/latest
+
+          cp ../approved-images.json approved-images.json
+
+          python3 - <<EOF
+          import json
+          from datetime import datetime, timezone
+
+          with open("registry.json") as f:
+              registry = json.load(f)
+
+          plugin_entry = next((p for p in registry["plugins"] if p["id"] == "$PLUGIN_ID"), None)
+
+          new_version = {
+              "version": "$VERSION",
+              "manifestPath": f"plugins/$PLUGIN_ID/$VERSION/plugin.manifest.json",
+              "publishedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "changelog": "${{ steps.meta.outputs.changelog }}"
+          }
+
+          if plugin_entry:
+              plugin_entry["latestVersion"] = "$VERSION"
+              existing = [v for v in plugin_entry["versions"] if v["version"] != "$VERSION"]
+              plugin_entry["versions"] = [new_version] + existing
+          else:
+              with open(f"plugins/$PLUGIN_ID/$VERSION/plugin.manifest.json") as f:
+                  manifest = json.load(f)
+              name = manifest["name"]["default"] if isinstance(manifest["name"], dict) else manifest["name"]
+              desc = manifest["description"]["default"] if isinstance(manifest["description"], dict) else manifest["description"]
+              registry["plugins"].append({
+                  "id": "$PLUGIN_ID",
+                  "name": name,
+                  "description": desc,
+                  "latestVersion": "$VERSION",
+                  "apiVersion": "1",
+                  "author": manifest.get("author", ""),
+                  "license": manifest.get("license", ""),
+                  "tags": [],
+                  "verified": False,
+                  "versions": [new_version]
+              })
+
+          registry["updatedAt"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+          with open("registry.json", "w") as f:
+              json.dump(registry, f, indent=2, ensure_ascii=False)
+
+          print(f"registry.json updated for {PLUGIN_ID}@{VERSION}")
+          EOF
+
+          git add .
+          git commit -S -m "chore: publish ${PLUGIN_ID}@${VERSION} [skip ci]"
+          git push
+
+          echo "✅ Plugin ${PLUGIN_ID}@${VERSION} successfully published to griffino-plugins."
