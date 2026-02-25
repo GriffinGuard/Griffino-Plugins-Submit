@@ -1,7 +1,0 @@
-{
-  "plugin.name": "DeepSeek AI",
-  "plugin.description": "Provides AI chat model capability via the DeepSeek official API.",
-  "capability.ai_chat_model.name": "AI Chat Model",
-  "capability.ai_chat_model.description": "Accepts a conversation history and returns a response from DeepSeek.",
-  "permission.desc.network_outbound": "Requires internet access to call the DeepSeek API."
-}
