@@ -94,50 +94,52 @@ jobs:
             }
             core.setFailed('Could not determine PR number.');
 
-      - name: Find CI run ID for this PR
+      - name: Download artifacts by name
         if: steps.find.outputs.plugin_dir != ''
-        id: ci_run
         uses: actions/github-script@v7
         with:
           script: |
-            const prNumber = parseInt('${{ steps.pr.outputs.number }}');
-            // 找到最近一次成功的 CI run，关联到此 PR 的 head commit
-            const runs = await github.rest.actions.listWorkflowRuns({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'ci-check.yml',
-              status: 'success',
-              per_page: 20,
-            });
-            // 找到关联此 PR 的 run
-            for (const run of runs.data.workflow_runs) {
-              if (run.pull_requests && run.pull_requests.some(pr => pr.number === prNumber)) {
-                core.setOutput('run_id', run.id.toString());
-                console.log(`Found CI run: ${run.id}`);
+            const fs = require('fs');
+            const path = require('path');
+            const prNumber = '${{ steps.pr.outputs.number }}';
+
+            for (const arch of ['amd64', 'arm64']) {
+              const name = `image-${arch}-pr${prNumber}`;
+              const artifacts = await github.rest.actions.listArtifactsForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: name,
+                per_page: 5,
+              });
+              if (artifacts.data.artifacts.length === 0) {
+                core.setFailed(`Artifact ${name} not found.`);
                 return;
               }
+              const artifact = artifacts.data.artifacts[0];
+              console.log(`Downloading ${name} (id: ${artifact.id})`);
+
+              const download = await github.rest.actions.downloadArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: artifact.id,
+                archive_format: 'zip',
+              });
+
+              fs.mkdirSync('/tmp/artifacts', { recursive: true });
+              const zipPath = `/tmp/artifacts/${name}.zip`;
+              fs.writeFileSync(zipPath, Buffer.from(download.data));
+              console.log(`Saved ${zipPath}`);
             }
-            core.setFailed(`No successful CI run found for PR #${prNumber}`);
 
-      - name: Download amd64 artifact
+      - name: Extract artifacts
         if: steps.find.outputs.plugin_dir != ''
-        uses: actions/download-artifact@v4
-        with:
-          name: image-amd64-pr${{ steps.pr.outputs.number }}
-          path: /tmp/artifacts
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          run-id: ${{ steps.ci_run.outputs.run_id }}
-
-      - name: Download arm64 artifact
-        if: steps.find.outputs.plugin_dir != ''
-        uses: actions/download-artifact@v4
-        with:
-          name: image-arm64-pr${{ steps.pr.outputs.number }}
-          path: /tmp/artifacts
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          run-id: ${{ steps.ci_run.outputs.run_id }}
+        run: |
+          cd /tmp/artifacts
+          for arch in amd64 arm64; do
+            PR="${{ steps.pr.outputs.number }}"
+            unzip -o "image-${arch}-pr${PR}.zip" -d .
+            ls -lh
+          done
 
       - name: Load images and create multi-arch manifest
         if: steps.find.outputs.plugin_dir != ''

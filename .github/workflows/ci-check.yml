@@ -272,6 +272,7 @@ jobs:
           name: image-amd64-pr${{ github.event.pull_request.number }}
           path: image-amd64.tar.gz
           retention-days: 90
+          overwrite: true
 
   # ── Job 3: Build arm64 ────────────────────────────────────────────────────
   build-arm64:
@@ -336,6 +337,7 @@ jobs:
           name: image-arm64-pr${{ github.event.pull_request.number }}
           path: image-arm64.tar.gz
           retention-days: 90
+          overwrite: true
 
   # ── Job 4: Post comment ───────────────────────────────────────────────────
   comment:
