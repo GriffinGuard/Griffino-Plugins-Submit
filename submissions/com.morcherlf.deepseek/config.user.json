@@ -1,0 +1,38 @@
+{
+  "GriffinoPluginConfigVersion": "1.0",
+  "pluginId": "com.morcherlf.deepseek",
+  "configs": [
+    {
+      "key": "USER_SYSTEM_PROMPT",
+      "name": "Personal System Prompt",
+      "description": "Appended after the global system prompt to personalize AI behavior.",
+      "type": "string",
+      "optional": true,
+      "default": "",
+      "group": "Personalization"
+    },
+    {
+      "key": "TEMPERATURE",
+      "name": "Temperature",
+      "description": "Controls response randomness. Higher values are more creative, lower values more focused. Range: 0.0–2.0.",
+      "type": "float",
+      "optional": true,
+      "default": "1.0",
+      "group": "Personalization"
+    },
+    {
+      "key": "REPLY_LANGUAGE",
+      "name": "Reply Language",
+      "description": "The language the AI will use for responses.",
+      "type": "options",
+      "optional": true,
+      "default": "auto",
+      "values": [
+        { "value": "auto",  "display": "Auto (follows user input language)" },
+        { "value": "zh-CN", "display": "简体中文" },
+        { "value": "en-US", "display": "English" }
+      ],
+      "group": "Personalization"
+    }
+  ]
+}
