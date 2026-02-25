@@ -290,7 +290,7 @@ jobs:
           cd publish-target
 
           git config user.name "GriffinoBot"
-          git config user.email "cd-bot@griffino.cc"
+          git config user.email "Griffino.Bot@gmail.com"
           git config user.signingkey ${{ secrets.GPG_KEY_ID }}
           git config commit.gpgsign true
 
