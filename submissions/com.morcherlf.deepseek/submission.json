@@ -1,11 +1,11 @@
 {
   "pluginId": "com.morcherlf.deepseek",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "developerGitHub": "MorCherlf",
   "sourceRepo": "https://github.com/MorCherlf/Griffino-DeepSeek-Plugin",
-  "sourceCommit": "f30e26efac2d706b06e695a4cf1cd36339c17915",
+  "sourceCommit": "3e1c8dd14b289bc296349a12b82383759c1e87ce",
   "mainServiceDockerfile": "Dockerfile",
-  "submittedAt": "2026-02-25T00:00:00Z",
-  "changelog": "Initial release.",
+  "submittedAt": "2026-03-01T00:00:00Z",
+  "changelog": "Update EntryPoint for the MQ",
   "notes": "DeepSeek AI chat model plugin. Provides ai.chat.model capability via the DeepSeek official API."
 }
